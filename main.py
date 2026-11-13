@@ -29,12 +29,23 @@ QUERIES = {
 }
 
 def pubmed_ids(query, start, end, count=30):
-    response = SESSION.get(EUTILS + "esearch.fcgi", params={
-        "db": "pubmed", "term": query, "retmode": "json",
-        "retmax": count, "sort": "pub date",
-        "datetype": "pdat", "mindate": start, "maxdate": end,
-    }, timeout=TIMEOUT)
-    response.raise_for_status()
+     for attempt in range(6):
+        response = SESSION.get(
+            EUTILS + "efetch.fcgi",
+            params={
+                "db": "pubmed",
+                "id": ",".join(ids),
+                "retmode": "xml",
+            },
+            timeout=TIMEOUT,
+        )
+        if response.status_code in (429, 500, 502, 503, 504):
+            if attempt < 5:
+                time.sleep(min(15 * (2 ** attempt), 120))
+                continue
+        response.raise_for_status()
+        break
+
     return response.json()["esearchresult"]["idlist"]
 
 def flatten(element):
