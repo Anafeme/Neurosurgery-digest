@@ -1,23 +1,24 @@
-name: Neuro Digest
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 6 * * 1' # Monday 09:00 Europe/Moscow (UTC+3)
-permissions:
-  contents: read
-jobs:
-  send:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install -r requirements.txt
-      - run: python main.py
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
-          OPENAI_MODEL: gpt-4.1-mini
+[README.md](https://github.com/user-attachments/files/34811232/README.md)
+# Neuro Digest Bot
+
+Еженедельный дайджест по нейрохирургии и нейрореанимации из PubMed с анализом аннотаций и отправкой в Telegram.
+
+## Установка
+1. Загрузите `main.py`, `requirements.txt` и папку `.github/workflows/` в корень приватного репозитория GitHub.
+2. В **Settings → Secrets and variables → Actions → Secrets** добавьте:
+   - `TELEGRAM_BOT_TOKEN` — токен от BotFather.
+   - `OPENAI_API_KEY` — ключ OpenAI API (требуется активный API billing).
+3. В **Variables** добавьте `TELEGRAM_CHAT_ID` со своим числовым Chat ID.
+4. В Telegram откройте бота и нажмите **Start**.
+5. В GitHub перейдите **Actions → Neuro Digest → Run workflow** для теста.
+6. В дальнейшем workflow запускается по понедельникам в 06:00 UTC = 09:00 МСК.
+
+## Ограничения
+- Время запуска GitHub Actions по cron приблизительное: при нагрузке GitHub возможна задержка.
+- Система оценивает **аннотации**, а не полные тексты; критическая оценка ограничена.
+- Фильтр использует дату публикации, а не дату индексации PubMed; отдельные свежие работы могут быть пропущены.
+- Если статей мало, дайджест может содержать менее 8 публикаций.
+- В текущей версии нет постоянного журнала отправленных PMID, поэтому при изменении окна возможны повторы.
+- Расходы OpenAI API оплачиваются отдельно; поиск PubMed и Telegram Bot API обычно бесплатны.
+- Если публикации или отправка недоступны, задача завершится ошибкой, которую можно увидеть во вкладке Actions.
+- Не загружайте токены в файлы репозитория и не публикуйте их в чате.
