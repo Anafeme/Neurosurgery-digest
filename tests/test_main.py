@@ -26,15 +26,21 @@ class DigestTests(unittest.TestCase):
                    'url': 'https://pubmed.ncbi.nlm.nih.gov/123/', 'abstract': 'Abstract',
                    'areas': list(main.QUERIES)}
         fields = {key: 'Очень длинное описание с числами 25% и ограничениями. ' * 100
-                  for key in ('summary', 'results', 'limitations', 'clinical_significance')}
+                  for key in ('objective', 'results')}
         with patch.object(main, 'ai_summary', return_value=main.format_summary(fields)):
             messages = main.make_digest([article], 'start', 'end')
         self.assertEqual(len(messages), 2)  # Header + exactly one paper.
         self.assertLessEqual(len(messages[1]), 1500)
         self.assertLessEqual(len(messages[1].encode('utf-16-le')) // 2, 4096)
         self.assertTrue(messages[1].endswith(article['url']))
-        for label in ('Краткое содержание:', 'Результаты:', 'Ограничения:', 'Клиническая значимость:'):
+        for label in ('Цель:', 'Результат:'):
             self.assertIn(label, messages[1])
+
+    def test_only_requested_fields_are_displayed(self):
+        result = main.format_summary({'objective': 'Оценить лечение', 'results': 'Боль уменьшилась',
+                                      'limitations': 'НЕ ВКЛЮЧАТЬ', 'clinical_significance': 'НЕ ВКЛЮЧАТЬ',
+                                      'design': 'НЕ ВКЛЮЧАТЬ'})
+        self.assertEqual(result, 'Цель: Оценить лечение\nРезультат: Боль уменьшилась')
 
     @patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': 'test-secret', 'TELEGRAM_CHAT_ID': '123'})
     def test_each_paper_has_exactly_one_send_request(self):
@@ -114,11 +120,12 @@ class DigestTests(unittest.TestCase):
     def test_fallback_survives_translation_failure(self):
         with patch.object(main.SESSION, 'get', side_effect=requests.Timeout):
             result = main.fallback_summary({'abstract': 'Results were inconclusive.'})
-        self.assertIn('перевод недоступен', result)
+        self.assertIn('перевод недоступен', result.lower())
         self.assertIn('Results were inconclusive.', result)
 
-    def test_fallback_uses_structured_results_and_limitations(self):
+    def test_fallback_only_includes_objective_and_results(self):
         article = {'abstract': 'Background. Results. Conclusion.', 'sections': {
+            'OBJECTIVE': 'Assess treatment efficacy.',
             'METHODS': 'Randomized trial with 120 participants.',
             'RESULTS': 'Mortality was 10% versus 20%.',
             'LIMITATIONS': 'Small sample size.',
@@ -126,24 +133,24 @@ class DigestTests(unittest.TestCase):
         }}
         with patch.object(main, 'translate_text', side_effect=lambda text: (text, True)):
             summary = main.fallback_summary(article)
-        self.assertIn('120 participants', summary)
+        self.assertIn('Assess treatment efficacy.', summary)
+        self.assertNotIn('120 participants', summary)
         self.assertIn('10% versus 20%', summary)
-        self.assertIn('Small sample size', summary)
-        self.assertIn('Further trials are needed', summary)
+        self.assertNotIn('Small sample size', summary)
+        self.assertNotIn('Further trials are needed', summary)
 
     @patch.dict(os.environ, {'GEMINI_API_KEY': 'test-key', 'GEMINI_FREE_TIER': 'true'})
     def test_ai_valid_structured_response(self):
         import json
         response = Mock()
-        fields = {'summary': 'Описание', 'results': 'Результаты',
-                  'limitations': 'Ограничения', 'clinical_significance': 'Значимость'}
+        fields = {'objective': 'Оценить лечение', 'results': 'Результаты'}
         response.json.return_value = {'candidates': [{'content': {'parts': [
             {'text': 'internal thought', 'thought': True},
             {'text': json.dumps(fields)},
         ]}}]}
         with patch.object(main.SESSION, 'post', return_value=response):
             summary = main.ai_summary({'title': 'A', 'abstract': 'B'})
-        self.assertIn('Клиническая значимость: Значимость', summary)
+        self.assertIn('Цель: Оценить лечение', summary)
         self.assertNotIn('internal thought', summary)
 
     @patch.dict(os.environ, {'OPENROUTER_API_KEY': 'private-test-key'})
@@ -151,12 +158,11 @@ class DigestTests(unittest.TestCase):
         import json
         response = Mock()
         response.json.return_value = {'choices': [{'message': {'content': json.dumps({
-            'summary': 'Описание', 'results': 'Результаты', 'limitations': 'Ограничения',
-            'clinical_significance': 'Значимость',
+            'objective': 'Оценить лечение', 'results': 'Результаты',
         })}}]}
         with patch.object(main.SESSION, 'post', return_value=response) as post:
             result = main.openrouter_summary({'title': 'A', 'abstract': 'B'})
-        self.assertIn('Краткое содержание', result)
+        self.assertIn('Цель:', result)
         payload = post.call_args.kwargs['json']
         self.assertEqual(payload['model'], 'openrouter/free')
         self.assertNotIn('models', payload)
@@ -171,7 +177,7 @@ class DigestTests(unittest.TestCase):
 
     def test_invalid_ai_payload_is_rejected(self):
         self.assertIsNone(main.format_summary([]))
-        self.assertIsNone(main.format_summary({'summary': 'partial'}))
+        self.assertIsNone(main.format_summary({'objective': 'partial'}))
 
     @patch.dict(os.environ, {'OPENROUTER_API_KEY': 'private-test-key'})
     def test_openrouter_retries_incomplete_fields(self):
@@ -180,8 +186,7 @@ class DigestTests(unittest.TestCase):
         bad.json.return_value = {'choices': [{'message': {'content': '{}'}}]}
         good = Mock(status_code=200)
         good.json.return_value = {'choices': [{'message': {'content': json.dumps({
-            'summary': 'Описание', 'results': 'Результаты', 'limitations': 'Ограничения',
-            'clinical_significance': 'Значимость',
+            'objective': 'Оценить лечение', 'results': 'Результаты',
         })}}]}
         with patch.object(main.SESSION, 'post', side_effect=[bad, good]) as post:
             result = main.openrouter_summary({'title': 'A', 'abstract': 'B'})
