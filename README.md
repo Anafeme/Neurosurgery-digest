@@ -1,1 +1,23 @@
-# Neurosurgery-digest
+name: Neuro Digest
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1' # Monday 09:00 Europe/Moscow (UTC+3)
+permissions:
+  contents: read
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python main.py
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
+          OPENAI_MODEL: gpt-4.1-mini
