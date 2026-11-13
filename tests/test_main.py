@@ -12,11 +12,13 @@ class DigestTests(unittest.TestCase):
             main, 'fetch_articles', side_effect=[
                 [{'pmid': str(i)} for i in range(1, 21)],
                 [{'pmid': str(i)} for i in range(20, 40)],
+                [{'pmid': str(i)} for i in range(39, 59)],
             ]):
             articles, start, end = main.select_articles()
         self.assertEqual(len(articles), 10)
         self.assertEqual(len({a['pmid'] for a in articles}), 10)
-        self.assertTrue(any('Нейрореанимация' in a['areas'] for a in articles))
+        for area in main.QUERIES:
+            self.assertGreaterEqual(sum(area in a['areas'] for a in articles), 3)
         self.assertEqual((end - start).days, 6)
 
     def test_unicode_messages_preserve_text_and_fit_telegram(self):

@@ -1,5 +1,5 @@
 
-"""Weekly neurosurgery and neurocritical care digest: PubMed -> optional free Gemini -> Telegram."""
+"""Weekly focused neurosurgery digest: PubMed -> free AI -> Telegram."""
 
 import os
 import sys
@@ -23,17 +23,43 @@ SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "NeurosurgeryDigest/1.2 (academic literature digest)"})
 
 QUERIES = {
-    "Нейрохирургия": (
-        '("Neurosurgical Procedures"[MeSH Terms] OR neurosurg*[Title/Abstract] '
-        'OR "brain surgery"[Title/Abstract] OR "spine surgery"[Title/Abstract])'
+    "Сосудистая нейрохирургия: аневризмы, АВМ, каверномы": (
+        '("Intracranial Aneurysm"[MeSH Terms] '
+        'OR "Intracranial Arteriovenous Malformations"[MeSH Terms] '
+        'OR "Hemangioma, Cavernous, Central Nervous System"[MeSH Terms] '
+        'OR ((aneurysm*[Title/Abstract] OR "arteriovenous malformation"[Title/Abstract] '
+        'OR "arteriovenous malformations"[Title/Abstract] OR cavernoma*[Title/Abstract] '
+        'OR "cavernous malformation"[Title/Abstract] OR "cavernous malformations"[Title/Abstract]) '
+        'AND (intracranial[Title/Abstract] OR cerebral[Title/Abstract] '
+        'OR brain[Title/Abstract] OR spinal[Title/Abstract] '
+        'OR subarachnoid[Title/Abstract] OR cerebell*[Title/Abstract] '
+        'OR brainstem[Title/Abstract])))'
     ),
-    "Нейрореанимация": (
-        '("Critical Care"[MeSH Terms] AND ("Brain Injuries"[MeSH Terms] '
-        'OR "Subarachnoid Hemorrhage"[MeSH Terms] OR neurolog*[Title/Abstract])) '
-        'OR neurocritical[Title/Abstract] OR "neurointensive care"[Title/Abstract] '
-        'OR "intracranial pressure"[Title/Abstract]'
+    "Хирургия позвоночника и спинного мозга": (
+        '("Spinal Fusion"[MeSH Terms] OR "Diskectomy"[MeSH Terms] '
+        'OR "Laminectomy"[MeSH Terms] OR "Spinal Cord/surgery"[MeSH Terms] '
+        'OR "spine surgery"[Title/Abstract] OR "spinal surgery"[Title/Abstract] '
+        'OR "spinal cord surgery"[Title/Abstract] '
+        'OR (("spinal cord"[Title/Abstract] OR "spinal tumor"[Title/Abstract] '
+        'OR "spinal tumors"[Title/Abstract] OR "spinal stenosis"[Title/Abstract] '
+        'OR "disc herniation"[Title/Abstract] OR "disk herniation"[Title/Abstract] '
+        'OR "cervical spine"[Title/Abstract] OR "lumbar spine"[Title/Abstract] '
+        'OR "thoracic spine"[Title/Abstract]) '
+        'AND (surg*[Title/Abstract] OR decompress*[Title/Abstract] '
+        'OR fusion[Title/Abstract] OR laminoplast*[Title/Abstract])))'
+    ),
+    "Нейротравма": (
+        '("Brain Injuries, Traumatic"[MeSH Terms] OR "Spinal Cord Injuries"[MeSH Terms] '
+        'OR "Craniocerebral Trauma"[MeSH Terms] '
+        'OR "traumatic brain injury"[Title/Abstract] '
+        'OR "traumatic brain injuries"[Title/Abstract] '
+        'OR "spinal cord injury"[Title/Abstract] '
+        'OR "spinal cord injuries"[Title/Abstract] '
+        'OR neurotrauma*[Title/Abstract] '
+        'OR "traumatic intracranial"[Title/Abstract])'
     ),
 }
+
 
 
 def pubmed_request(endpoint, params):
@@ -135,7 +161,7 @@ def select_articles():
             previous_areas = candidates.get(pmid, {}).get("areas", [])
             article["areas"] = sorted(set(previous_areas) | {area})
             candidates[pmid] = article
-    # Alternate topics so one specialty cannot consume every available slot.
+    # Round-robin across the three topics; shared PMID values appear only once.
     selected = []
     used = set()
     queues = [[a for a in candidates.values() if area in a["areas"]] for area in QUERIES]
@@ -299,7 +325,8 @@ def make_digest(articles, start, end):
     if not articles:
         raise RuntimeError("PubMed returned no eligible articles with abstracts")
     parts = [f"НЕЙРОДАЙДЖЕСТ | новые записи PubMed: {start} — {end}",
-             f"Публикаций: {len(articles)}. Оценка по аннотациям, не клинические рекомендации."]
+             f"Публикаций: {len(articles)}. Оценка по аннотациям, не клинические рекомендации.",
+             "Направления: " + "; ".join(QUERIES)]
     if len(articles) < 8:
         parts.append("За неделю найдено менее 8 подходящих работ; старые статьи не добавлены.")
     ai_count = 0
@@ -311,7 +338,7 @@ def make_digest(articles, start, end):
         else:
             ai_count += 1
         parts.append(f"{number}. {article['title']}\n{article['journal']} ({article['year']})\n"
-                     f"{article['url']}\n{summary}")
+                     f"{article['url']}\nТемы: {', '.join(article.get('areas', []))}\n{summary}")
     mode = f"AI={ai_count}; fallback={len(articles) - ai_count}"
     print(f"Digest prepared: {len(articles)} publications; {mode}", flush=True)
     return "\n\n".join(parts)
