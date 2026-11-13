@@ -1,2 +1,1 @@
-openai>=1.50,<3
-requests>=2.31,<3
+requests==2.32.5
