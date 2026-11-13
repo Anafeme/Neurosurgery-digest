@@ -19,6 +19,10 @@ TIMEOUT = 45
 MAX_RETRIES = 6
 OPENROUTER_BLOCKED = False
 
+class DigestError(RuntimeError):
+    """An application error with a deliberately secret-free diagnostic message."""
+
+
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "NeurosurgeryDigest/1.2 (academic literature digest)"})
 
@@ -104,7 +108,7 @@ def pubmed_request(endpoint, params):
 
         response.raise_for_status()
         return response
-    raise RuntimeError("PubMed request failed after retries")
+    raise DigestError("PubMed request failed after retries")
 
 
 def pubmed_ids(query, start, end, count=60):
@@ -455,13 +459,13 @@ def article_message(article, number, total, summary):
     )
     # Each paper is one indivisible Telegram message, including its source link.
     if len(message) > 1500 or len(message.encode("utf-16-le")) // 2 > 4096:
-        raise RuntimeError("Article message exceeds compact format")
+        raise DigestError("Article message exceeds compact format")
     return message
 
 
 def make_digest(articles, start, end):
     if not articles:
-        raise RuntimeError("PubMed returned no eligible articles with abstracts")
+        raise DigestError("PubMed returned no eligible articles with abstracts")
     header = (f"НЕЙРОДАЙДЖЕСТ · {start} — {end}\n"
               f"Публикаций: {len(articles)}. Цель и главный результат каждой работы.\n"
               "Флаг — страна журнала по PubMed; 🌐 — страна не определена.")
@@ -496,7 +500,7 @@ def send_telegram(messages):
     if isinstance(messages, str):
         messages = [messages]
     if any(not part or len(part.encode("utf-16-le")) // 2 > 4096 for part in messages):
-        raise RuntimeError("Invalid Telegram message size")
+        raise DigestError("Invalid Telegram message size")
     token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
     chat_id = os.environ["TELEGRAM_CHAT_ID"].strip()
     url = f"{TELEGRAM_API}{token}/sendMessage"
@@ -511,16 +515,16 @@ def send_telegram(messages):
                 result = response.json()
             except (requests.RequestException, ValueError):
                 # A timeout can mean accepted delivery; avoid automatic duplicates.
-                raise RuntimeError("Telegram transport error; delivery uncertain") from None
+                raise DigestError("Telegram transport error; delivery uncertain") from None
             if response.status_code == 429 and attempt < 3:
                 delay = int(result.get("parameters", {}).get("retry_after", 5))
                 time.sleep(min(max(delay, 1), 120))
                 continue
             if not response.ok or not result.get("ok"):
-                raise RuntimeError(f"Telegram rejected message (HTTP {response.status_code})")
+                raise DigestError(f"Telegram rejected message (HTTP {response.status_code})")
             receipt = result.get("result", {})
             if not receipt.get("message_id") or str(receipt.get("chat", {}).get("id")) != chat_id:
-                raise RuntimeError("Telegram returned an invalid delivery receipt")
+                raise DigestError("Telegram returned an invalid delivery receipt")
             delivered += 1
             print(f"Telegram confirmed message {delivered}; message_id={receipt['message_id']}", flush=True)
             break
@@ -531,7 +535,7 @@ def send_telegram(messages):
 def main():
     for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
         if not os.environ.get(key, "").strip():
-            raise RuntimeError(f"Missing required secret or variable: {key}")
+            raise DigestError(f"Missing required secret or variable: {key}")
     if "--test-telegram" in sys.argv:
         send_telegram("Тест Neurosurgery Digest: бот работает. Расписание: понедельник, 09:00 МСК.")
         print("SUCCESS: Telegram API confirmed test delivery", flush=True)
@@ -549,5 +553,6 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         # Never print exception text/tracebacks: requests URLs can contain secrets.
-        print(f"ERROR: {type(exc).__name__}; operation failed", file=sys.stderr, flush=True)
+        detail = str(exc) if isinstance(exc, DigestError) else "operation failed"
+        print(f"ERROR: {type(exc).__name__}; {detail}", file=sys.stderr, flush=True)
         sys.exit(1)
