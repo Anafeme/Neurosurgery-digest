@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '0 6 * * 1' # Monday 09:00 Europe/Moscow (UTC+3)
-permissions:
+  permissions:
   contents: read
 jobs:
   send:
