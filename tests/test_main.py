@@ -116,6 +116,31 @@ class DigestTests(unittest.TestCase):
         self.assertIsNone(main.format_summary([]))
         self.assertIsNone(main.format_summary({'summary': 'partial'}))
 
+    @patch.dict(os.environ, {'OPENROUTER_API_KEY': 'private-test-key'})
+    def test_openrouter_retries_incomplete_fields(self):
+        import json
+        bad = Mock(status_code=200)
+        bad.json.return_value = {'choices': [{'message': {'content': '{}'}}]}
+        good = Mock(status_code=200)
+        good.json.return_value = {'choices': [{'message': {'content': json.dumps({
+            'summary': 'Описание', 'results': 'Результаты', 'limitations': 'Ограничения',
+            'clinical_significance': 'Значимость',
+        })}}]}
+        with patch.object(main.SESSION, 'post', side_effect=[bad, good]) as post:
+            result = main.openrouter_summary({'title': 'A', 'abstract': 'B'})
+        self.assertIsNotNone(result)
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_args.kwargs['json']['response_format']['type'], 'json_object')
+
+    def test_one_invalid_paper_does_not_disable_remaining_ai(self):
+        articles = [{'title': 'A', 'abstract': 'B', 'journal': 'J', 'year': '2026', 'url': 'url'}] * 2
+        with patch.object(main, 'ai_summary', side_effect=[None, 'AI summary']) as ai, patch.object(
+            main, 'fallback_summary', return_value='fallback'
+        ):
+            digest = main.make_digest(articles, 'start', 'end')
+        self.assertEqual(ai.call_count, 2)
+        self.assertIn('AI summary', digest)
+
     def test_empty_pubmed_is_failure(self):
         with self.assertRaises(RuntimeError):
             main.make_digest([], 'start', 'end')

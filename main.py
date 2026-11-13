@@ -17,6 +17,7 @@ EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 TELEGRAM_API = "https://api.telegram.org/bot"
 TIMEOUT = 45
 MAX_RETRIES = 6
+OPENROUTER_BLOCKED = False
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "NeurosurgeryDigest/1.2 (academic literature digest)"})
@@ -224,34 +225,45 @@ def format_summary(data):
 
 
 def openrouter_summary(article):
+    global OPENROUTER_BLOCKED
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not key:
+    if not key or OPENROUTER_BLOCKED:
         return None
-    try:
-        response = SESSION.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json={
-                # This router only selects free models. No paid model fallbacks.
-                "model": "openrouter/free",
-                "messages": [{"role": "user", "content": summary_prompt(article)}],
-                "temperature": 0.1,
-                "max_tokens": 3000,
-            }, timeout=90)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        if not isinstance(content, str):
+    for attempt in range(2):
+        response = None
+        try:
+            response = SESSION.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model": "openrouter/free",
+                    "messages": [{"role": "user", "content": summary_prompt(article)}],
+                    "temperature": 0.1,
+                    "max_tokens": 4000,
+                    "response_format": {"type": "json_object"},
+                    "provider": {"require_parameters": True},
+                }, timeout=90)
+            if response.status_code in (401, 402, 403, 429):
+                OPENROUTER_BLOCKED = True
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise ValueError("Missing content")
+            content = content.strip()
+            if content.startswith("```"):
+                content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content).strip()
+            summary = format_summary(json.loads(content))
+            if summary:
+                print("Free OpenRouter analysis validated", flush=True)
+                return summary
+            print("OpenRouter returned incomplete fields; retrying this paper", flush=True)
+        except requests.RequestException:
+            status = response.status_code if response is not None else "transport"
+            print(f"Free OpenRouter request failed; status={status}", flush=True)
             return None
-        content = content.strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content).strip()
-        summary = format_summary(json.loads(content))
-        if summary:
-            print("Free OpenRouter analysis validated", flush=True)
-        return summary
-    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
-        print("Free OpenRouter unavailable; trying another free provider or fallback", flush=True)
-        return None
+        except (ValueError, KeyError, IndexError, TypeError):
+            print("OpenRouter returned invalid JSON; retrying this paper", flush=True)
+    return None
 
 
 def ai_summary(article):
@@ -290,15 +302,17 @@ def make_digest(articles, start, end):
              f"Публикаций: {len(articles)}. Оценка по аннотациям, не клинические рекомендации."]
     if len(articles) < 8:
         parts.append("За неделю найдено менее 8 подходящих работ; старые статьи не добавлены.")
-    ai_available = True
+    ai_count = 0
+    ai_deadline = time.monotonic() + 480
     for number, article in enumerate(articles, 1):
-        summary = ai_summary(article) if ai_available else None
+        summary = ai_summary(article) if time.monotonic() < ai_deadline else None
         if summary is None:
-            ai_available = False
             summary = fallback_summary(article)
+        else:
+            ai_count += 1
         parts.append(f"{number}. {article['title']}\n{article['journal']} ({article['year']})\n"
                      f"{article['url']}\n{summary}")
-    mode = "ИИ с резервным режимом" if ai_available else "резервный режим без ИИ (полностью или частично)"
+    mode = f"AI={ai_count}; fallback={len(articles) - ai_count}"
     print(f"Digest prepared: {len(articles)} publications; {mode}", flush=True)
     return "\n\n".join(parts)
 
