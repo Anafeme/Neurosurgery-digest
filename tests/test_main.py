@@ -89,6 +89,33 @@ class DigestTests(unittest.TestCase):
         self.assertIn('Клиническая значимость: Значимость', summary)
         self.assertNotIn('internal thought', summary)
 
+    @patch.dict(os.environ, {'OPENROUTER_API_KEY': 'private-test-key'})
+    def test_openrouter_uses_only_free_router(self):
+        import json
+        response = Mock()
+        response.json.return_value = {'choices': [{'message': {'content': json.dumps({
+            'summary': 'Описание', 'results': 'Результаты', 'limitations': 'Ограничения',
+            'clinical_significance': 'Значимость',
+        })}}]}
+        with patch.object(main.SESSION, 'post', return_value=response) as post:
+            result = main.openrouter_summary({'title': 'A', 'abstract': 'B'})
+        self.assertIn('Краткое содержание', result)
+        payload = post.call_args.kwargs['json']
+        self.assertEqual(payload['model'], 'openrouter/free')
+        self.assertNotIn('models', payload)
+        self.assertNotIn('private-test-key', str(payload))
+
+    def test_openrouter_failure_tries_gemini(self):
+        with patch.object(main, 'openrouter_summary', return_value=None), patch.object(
+            main, 'gemini_summary', return_value='Gemini result'
+        ) as gemini:
+            self.assertEqual(main.ai_summary({}), 'Gemini result')
+            gemini.assert_called_once()
+
+    def test_invalid_ai_payload_is_rejected(self):
+        self.assertIsNone(main.format_summary([]))
+        self.assertIsNone(main.format_summary({'summary': 'partial'}))
+
     def test_empty_pubmed_is_failure(self):
         with self.assertRaises(RuntimeError):
             main.make_digest([], 'start', 'end')

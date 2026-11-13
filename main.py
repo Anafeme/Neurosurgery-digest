@@ -200,15 +200,8 @@ def fallback_summary(article):
     )
 
 
-def ai_summary(article):
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    # Only configure keys from projects without billing; this flag can disable AI.
-    if not key or os.environ.get("GEMINI_FREE_TIER", "true").lower() != "true":
-        return None
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
-    if not re.fullmatch(r"[a-zA-Z0-9.-]+", model):
-        return None
-    prompt = (
+def summary_prompt(article):
+    return (
         "Ты научный медицинский редактор. Ответь только JSON с четырьмя непустыми "
         "строковыми полями: summary, results, limitations, clinical_significance. "
         "Пиши по-русски кратко (каждое поле до 650 символов). Используй только данные "
@@ -218,6 +211,62 @@ def ai_summary(article):
         "Не давай категоричных рекомендаций. Если данных нет, явно сообщи это.\n"
         + json.dumps({"title": article["title"], "abstract": article["abstract"]}, ensure_ascii=False)
     )
+
+
+def format_summary(data):
+    fields = {"summary": "Краткое содержание", "results": "Результаты",
+              "limitations": "Ограничения", "clinical_significance": "Клиническая значимость"}
+    if not isinstance(data, dict) or any(
+        not isinstance(data.get(k), str) or not data[k].strip() for k in fields
+    ):
+        return None
+    return "\n".join(f"{label}: {data[k][:900]}" for k, label in fields.items())
+
+
+def openrouter_summary(article):
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not key:
+        return None
+    try:
+        response = SESSION.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                # This router only selects free models. No paid model fallbacks.
+                "model": "openrouter/free",
+                "messages": [{"role": "user", "content": summary_prompt(article)}],
+                "temperature": 0.1,
+                "max_tokens": 3000,
+            }, timeout=90)
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            return None
+        content = content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content).strip()
+        summary = format_summary(json.loads(content))
+        if summary:
+            print("Free OpenRouter analysis validated", flush=True)
+        return summary
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        print("Free OpenRouter unavailable; trying another free provider or fallback", flush=True)
+        return None
+
+
+def ai_summary(article):
+    return openrouter_summary(article) or gemini_summary(article)
+
+
+def gemini_summary(article):
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    # Only configure keys from projects without billing; this flag can disable AI.
+    if not key or os.environ.get("GEMINI_FREE_TIER", "true").lower() != "true":
+        return None
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+    if not re.fullmatch(r"[a-zA-Z0-9.-]+", model):
+        return None
+    prompt = summary_prompt(article)
     try:
         response = SESSION.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -228,11 +277,7 @@ def ai_summary(article):
         response.raise_for_status()
         parts = response.json()["candidates"][0]["content"]["parts"]
         data = json.loads("".join(p.get("text", "") for p in parts if not p.get("thought")))
-        fields = {"summary": "Краткое содержание", "results": "Результаты",
-                  "limitations": "Ограничения", "clinical_significance": "Клиническая значимость"}
-        if any(not isinstance(data.get(k), str) or not data[k].strip() for k in fields):
-            return None
-        return "\n".join(f"{label}: {data[k][:900]}" for k, label in fields.items())
+        return format_summary(data)
     except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
         print("Free AI unavailable or quota exhausted; using non-AI fallback", flush=True)
         return None

@@ -21,3 +21,11 @@ OpenAI полностью исключён, его ключ не использ�
 Система анализирует аннотации, не полные тексты, и не заменяет клиническое решение. Постоянного журнала PMID пока нет: ручные повторные запуски и повторное индексирование могут привести к повторам.
 
 Локальная проверка: `python -m pip install -r requirements.txt`, `python -m pip check`, `python -m py_compile main.py`, `python -m unittest discover -s tests -v`.
+
+## OpenRouter вместо Gemini
+
+Secret `OPENROUTER_API_KEY` автоматически включает OpenRouter как первый сервис.
+Получить ключ: https://openrouter.ai/settings/keys. Сохранить его: Settings → Secrets and variables → Actions → New repository secret.
+Используется строго `openrouter/free`: платные модели и платные резервные маршруты не задаются.
+При ошибке или исчерпании бесплатной квоты используется Gemini (если настроен), затем резервный режим без ИИ.
+Для проверки требуется запуск digest и строка `Free OpenRouter analysis validated` в Actions; успешная отправка без этой строки не подтверждает работу OpenRouter.
