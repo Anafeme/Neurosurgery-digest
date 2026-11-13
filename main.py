@@ -148,6 +148,7 @@ def fetch_articles(ids):
             articles.append({
                 "pmid": pmid, "title": title, "abstract": abstract[:5500],
                 "journal": journal, "year": year, "doi": doi, "sections": sections,
+                "country": flatten(item.find("./MedlineCitation/MedlineJournalInfo/Country")),
                 "publication_types": [flatten(n) for n in item.findall(".//PublicationType")],
                 "mesh_terms": [flatten(n) for n in item.findall(".//MeshHeading/DescriptorName")],
                 "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
@@ -406,9 +407,50 @@ def gemini_summary(article):
         return None
 
 
+# PubMed's Country describes the journal's place of publication, not study location.
+COUNTRY_CODES = {
+    "united states": "US", "united states of america": "US", "usa": "US",
+    "england": "GB", "united kingdom": "GB", "great britain": "GB", "uk": "GB",
+    "scotland": "GB", "wales": "GB", "northern ireland": "GB",
+    "netherlands": "NL", "germany": "DE", "france": "FR", "switzerland": "CH",
+    "italy": "IT", "spain": "ES", "portugal": "PT", "belgium": "BE",
+    "austria": "AT", "sweden": "SE", "norway": "NO", "denmark": "DK",
+    "finland": "FI", "iceland": "IS", "ireland": "IE", "poland": "PL",
+    "czech republic": "CZ", "czechia": "CZ", "slovakia": "SK", "hungary": "HU",
+    "romania": "RO", "bulgaria": "BG", "greece": "GR", "croatia": "HR",
+    "slovenia": "SI", "serbia": "RS", "bosnia and herzegovina": "BA",
+    "russia": "RU", "russian federation": "RU", "ukraine": "UA", "belarus": "BY",
+    "estonia": "EE", "latvia": "LV", "lithuania": "LT", "georgia": "GE",
+    "armenia": "AM", "azerbaijan": "AZ", "kazakhstan": "KZ", "uzbekistan": "UZ",
+    "turkey": "TR", "türkiye": "TR", "turkiye": "TR", "israel": "IL",
+    "iran": "IR", "iran (islamic republic of)": "IR", "iraq": "IQ",
+    "saudi arabia": "SA", "united arab emirates": "AE", "qatar": "QA",
+    "kuwait": "KW", "jordan": "JO", "lebanon": "LB", "egypt": "EG",
+    "china": "CN", "people's republic of china": "CN", "japan": "JP",
+    "korea (south)": "KR", "south korea": "KR", "republic of korea": "KR",
+    "korea, republic of": "KR", "taiwan": "TW", "hong kong": "HK", "macao": "MO",
+    "india": "IN", "pakistan": "PK", "bangladesh": "BD", "nepal": "NP",
+    "sri lanka": "LK", "singapore": "SG", "malaysia": "MY", "thailand": "TH",
+    "indonesia": "ID", "philippines": "PH", "vietnam": "VN", "viet nam": "VN",
+    "australia": "AU", "new zealand": "NZ", "canada": "CA", "mexico": "MX",
+    "brazil": "BR", "argentina": "AR", "chile": "CL", "colombia": "CO",
+    "peru": "PE", "venezuela": "VE", "cuba": "CU", "uruguay": "UY",
+    "south africa": "ZA", "nigeria": "NG", "kenya": "KE", "ethiopia": "ET",
+    "morocco": "MA", "tunisia": "TN", "algeria": "DZ", "ghana": "GH",
+}
+
+
+def country_flag(country):
+    normalized = " ".join((country or "").strip().lower().split())
+    code = COUNTRY_CODES.get(normalized)
+    if not code:
+        return "🌐"
+    return "".join(chr(0x1F1E6 + ord(letter) - ord("A")) for letter in code)
+
+
 def article_message(article, number, total, summary):
     message = (
-        f"{number}/{total} · {compact_text(article['title'], 200)}\n\n"
+        f"{country_flag(article.get('country'))} {number}/{total} · {compact_text(article['title'], 200)}\n\n"
         f"{summary}\n\n{article['url']}"
     )
     # Each paper is one indivisible Telegram message, including its source link.
@@ -421,7 +463,8 @@ def make_digest(articles, start, end):
     if not articles:
         raise RuntimeError("PubMed returned no eligible articles with abstracts")
     header = (f"НЕЙРОДАЙДЖЕСТ · {start} — {end}\n"
-              f"Публикаций: {len(articles)}. Цель и главный результат каждой работы.")
+              f"Публикаций: {len(articles)}. Цель и главный результат каждой работы.\n"
+              "Флаг — страна журнала по PubMed; 🌐 — страна не определена.")
     if len(articles) < 8:
         header += "\nЗа неделю найдено менее 8 подходящих работ."
     messages = [header]

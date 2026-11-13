@@ -203,6 +203,29 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(ai.call_count, 2)
         self.assertTrue(any('AI summary' in message for message in digest))
 
+    def test_country_flags_use_journal_country_and_handle_unknown(self):
+        self.assertEqual(main.country_flag('United States'), '🇺🇸')
+        self.assertEqual(main.country_flag('England'), '🇬🇧')
+        self.assertEqual(main.country_flag('Netherlands'), '🇳🇱')
+        self.assertEqual(main.country_flag('  Japan  '), '🇯🇵')
+        self.assertEqual(main.country_flag(''), '🌐')
+        self.assertEqual(main.country_flag('International'), '🌐')
+
+    def test_country_is_taken_from_journal_metadata_not_author_affiliation(self):
+        response = Mock()
+        response.content = b"""<PubmedArticleSet><PubmedArticle><MedlineCitation>
+          <PMID>123</PMID><Article><ArticleTitle>A paper</ArticleTitle>
+          <Abstract><AbstractText>Results.</AbstractText></Abstract>
+          <AuthorList><Author><AffiliationInfo><Affiliation>France</Affiliation></AffiliationInfo></Author></AuthorList>
+          </Article><MedlineJournalInfo><Country>Japan</Country></MedlineJournalInfo>
+          </MedlineCitation></PubmedArticle></PubmedArticleSet>"""
+        with patch.object(main, 'pubmed_request', return_value=response):
+            article = main.fetch_articles(['123'])[0]
+        self.assertEqual(article['country'], 'Japan')
+        message = main.article_message(article, 1, 1, 'Цель: Проверить.\nРезультат: Найдено.')
+        self.assertTrue(message.startswith('🇯🇵 1/1'))
+        self.assertNotIn('France', message)
+
     def test_empty_pubmed_is_failure(self):
         with self.assertRaises(RuntimeError):
             main.make_digest([], 'start', 'end')
