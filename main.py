@@ -28,8 +28,24 @@ QUERIES = {
     ),
 }
 
+
 def pubmed_ids(query, start, end, count=30):
-     for attempt in range(6):
+    response = SESSION.get(EUTILS + "esearch.fcgi", params={
+        "db": "pubmed", "term": query, "retmode": "json",
+        "retmax": count, "sort": "pub date",
+        "datetype": "pdat", "mindate": start, "maxdate": end,
+    }, timeout=TIMEOUT)
+    response.raise_for_status()
+    return response.json()["esearchresult"]["idlist"]
+
+
+    return " ".join("".join(element.itertext()).split()) if element is not None else ""
+
+def fetch_articles(ids):
+    if not ids:
+        return []
+    
+    for attempt in range(6):
         response = SESSION.get(
             EUTILS + "efetch.fcgi",
             params={
@@ -46,18 +62,6 @@ def pubmed_ids(query, start, end, count=30):
         response.raise_for_status()
         break
 
-    return response.json()["esearchresult"]["idlist"]
-
-def flatten(element):
-    return " ".join("".join(element.itertext()).split()) if element is not None else ""
-
-def fetch_articles(ids):
-    if not ids:
-        return []
-    response = SESSION.post(EUTILS + "efetch.fcgi", data={
-        "db": "pubmed", "id": ",".join(ids), "retmode": "xml"
-    }, timeout=TIMEOUT)
-    response.raise_for_status()
     root = ET.fromstring(response.content)
     out = []
     for article in root.findall(".//PubmedArticle"):
