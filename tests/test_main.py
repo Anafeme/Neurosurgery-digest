@@ -21,11 +21,64 @@ class DigestTests(unittest.TestCase):
             self.assertGreaterEqual(sum(area in a['areas'] for a in articles), 3)
         self.assertEqual((end - start).days, 6)
 
-    def test_unicode_messages_preserve_text_and_fit_telegram(self):
-        original = '🧠' * 5000
-        parts = list(main.split_messages(original, 1900))
-        self.assertEqual(''.join(parts), original)
-        self.assertTrue(all(len(p.encode('utf-16-le')) // 2 <= 4096 for p in parts))
+    def test_article_is_one_short_message_even_with_long_model_output(self):
+        article = {'title': '🧠' * 600, 'journal': 'Journal' * 100, 'year': '2026',
+                   'url': 'https://pubmed.ncbi.nlm.nih.gov/123/', 'abstract': 'Abstract',
+                   'areas': list(main.QUERIES)}
+        fields = {key: 'Очень длинное описание с числами 25% и ограничениями. ' * 100
+                  for key in ('summary', 'results', 'limitations', 'clinical_significance')}
+        with patch.object(main, 'ai_summary', return_value=main.format_summary(fields)):
+            messages = main.make_digest([article], 'start', 'end')
+        self.assertEqual(len(messages), 2)  # Header + exactly one paper.
+        self.assertLessEqual(len(messages[1]), 1500)
+        self.assertLessEqual(len(messages[1].encode('utf-16-le')) // 2, 4096)
+        self.assertTrue(messages[1].endswith(article['url']))
+        for label in ('Краткое содержание:', 'Результаты:', 'Ограничения:', 'Клиническая значимость:'):
+            self.assertIn(label, messages[1])
+
+    @patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': 'test-secret', 'TELEGRAM_CHAT_ID': '123'})
+    def test_each_paper_has_exactly_one_send_request(self):
+        response = Mock(ok=True, status_code=200)
+        response.json.return_value = {'ok': True, 'result': {'message_id': 1, 'chat': {'id': 123}}}
+        messages = ['Header', 'Paper 1', 'Paper 2']
+        with patch.object(main.SESSION, 'post', return_value=response) as post, patch.object(main.time, 'sleep'):
+            self.assertEqual(main.send_telegram(messages), 3)
+        self.assertEqual([call.kwargs['json']['text'] for call in post.call_args_list], messages)
+
+    def test_ranking_favors_clinical_evidence(self):
+        trial = {'publication_types': ['Randomized Controlled Trial'], 'title': 'Treatment comparison'}
+        case = {'publication_types': ['Case Reports'], 'title': 'A case report'}
+        animal = {'publication_types': ['Journal Article'], 'mesh_terms': ['Animals'], 'title': 'Study in rats'}
+        self.assertGreater(main.evidence_score(trial), main.evidence_score(case))
+        self.assertGreater(main.evidence_score(trial), main.evidence_score(animal))
+        self.assertGreater(main.evidence_score({'title': 'A systematic review'}), main.evidence_score(case))
+        self.assertFalse(main.eligible_article({'publication_types': ['Retracted Publication']}))
+
+    def test_review_mentioning_trials_is_not_ranked_as_trial(self):
+        review = {'title': 'A narrative review', 'abstract': 'Randomized trials are needed.',
+                  'publication_types': ['Review']}
+        self.assertLess(main.evidence_score(review), 80)
+        self.assertLess(main.evidence_score({'title': 'Is a Randomized Trial Feasible?'}), 80)
+        self.assertFalse(main.eligible_article({'title': 'Protocol for a randomized trial'}))
+
+    def test_off_topic_cardiovascular_and_urology_papers_are_excluded(self):
+        vascular, spine, trauma = list(main.QUERIES)
+        self.assertFalse(main.matches_topic({'title': 'Outcomes of a multibranch aortic device'}, spine))
+        self.assertFalse(main.matches_topic({'title': 'Intradetrusor injections in spinal cord injury'}, trauma))
+        self.assertFalse(main.matches_topic({'title': 'A narrative review of general intensive care'}, vascular))
+        self.assertTrue(main.matches_topic({'title': 'Endovascular treatment of intracranial aneurysms'}, vascular))
+        self.assertTrue(main.matches_topic({'title': 'Lumbar discectomy clinical trial'}, spine))
+        self.assertTrue(main.matches_topic({'title': 'Outcomes of severe traumatic brain injury'}, trauma))
+
+    def test_selection_prefers_high_ranked_paper_within_each_topic(self):
+        pools = [[{'pmid': f'{topic}-{i}', 'publication_types': ['Case Reports']} for i in range(12)]
+                 + [{'pmid': f'{topic}-trial', 'publication_types': ['Randomized Controlled Trial']}]
+                 for topic in range(3)]
+        with patch.object(main, 'pubmed_ids', return_value=['1']), patch.object(
+            main, 'fetch_articles', side_effect=pools
+        ):
+            articles, _, _ = main.select_articles()
+        self.assertTrue(all(a['pmid'].endswith('-trial') for a in articles[:3]))
 
     @patch.dict(os.environ, {'GEMINI_API_KEY': 'test-key', 'GEMINI_FREE_TIER': 'true'})
     def test_ai_quota_exhaustion(self):
@@ -141,7 +194,7 @@ class DigestTests(unittest.TestCase):
         ):
             digest = main.make_digest(articles, 'start', 'end')
         self.assertEqual(ai.call_count, 2)
-        self.assertIn('AI summary', digest)
+        self.assertTrue(any('AI summary' in message for message in digest))
 
     def test_empty_pubmed_is_failure(self):
         with self.assertRaises(RuntimeError):
