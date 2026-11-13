@@ -173,7 +173,8 @@ def evidence_score(article):
     methods = " ".join(text for label, text in article.get("sections", {}).items()
                        if re.search(r"method|design", label, re.I)).lower()
     is_review = bool(types.intersection({"review", "systematic review", "meta-analysis"})) or "review" in title
-    not_trial = bool(re.search(r"protocol|feasib|non[- ]randomi[sz]ed", title))
+    not_trial = bool(re.search(r"protocol|feasib", title)
+                     or re.search(r"non[- ]?randomi[sz]ed", title + " " + methods))
     trial_signal = re.search(r"randomi[sz]ed|randomly assigned", title + " " + methods)
     if trial_signal and not is_review and not not_trial:
         score = max(score, 95)

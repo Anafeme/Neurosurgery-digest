@@ -60,6 +60,8 @@ class DigestTests(unittest.TestCase):
         self.assertLess(main.evidence_score(review), 80)
         self.assertLess(main.evidence_score({'title': 'Is a Randomized Trial Feasible?'}), 80)
         self.assertFalse(main.eligible_article({'title': 'Protocol for a randomized trial'}))
+        self.assertLess(main.evidence_score({'title': 'A comparative study',
+                         'sections': {'METHODS': 'A non-randomized prospective study.'}}), 80)
 
     def test_off_topic_cardiovascular_and_urology_papers_are_excluded(self):
         vascular, spine, trauma = list(main.QUERIES)
