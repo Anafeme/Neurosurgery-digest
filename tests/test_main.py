@@ -33,7 +33,7 @@ class DigestTests(unittest.TestCase):
             self.assertIsNone(main.ai_summary({'title': 'A', 'abstract': 'B'}))
 
     @patch.dict(os.environ, {'GEMINI_API_KEY': 'test-key', 'GEMINI_FREE_TIER': 'false'})
-    def test_ai_requires_free_tier_opt_in(self):
+    def test_ai_can_be_explicitly_disabled(self):
         with patch.object(main.SESSION, 'post') as post:
             self.assertIsNone(main.ai_summary({}))
             post.assert_not_called()
@@ -59,6 +59,35 @@ class DigestTests(unittest.TestCase):
             result = main.fallback_summary({'abstract': 'Results were inconclusive.'})
         self.assertIn('перевод недоступен', result)
         self.assertIn('Results were inconclusive.', result)
+
+    def test_fallback_uses_structured_results_and_limitations(self):
+        article = {'abstract': 'Background. Results. Conclusion.', 'sections': {
+            'METHODS': 'Randomized trial with 120 participants.',
+            'RESULTS': 'Mortality was 10% versus 20%.',
+            'LIMITATIONS': 'Small sample size.',
+            'CONCLUSIONS': 'Further trials are needed.',
+        }}
+        with patch.object(main, 'translate_text', side_effect=lambda text: (text, True)):
+            summary = main.fallback_summary(article)
+        self.assertIn('120 participants', summary)
+        self.assertIn('10% versus 20%', summary)
+        self.assertIn('Small sample size', summary)
+        self.assertIn('Further trials are needed', summary)
+
+    @patch.dict(os.environ, {'GEMINI_API_KEY': 'test-key', 'GEMINI_FREE_TIER': 'true'})
+    def test_ai_valid_structured_response(self):
+        import json
+        response = Mock()
+        fields = {'summary': 'Описание', 'results': 'Результаты',
+                  'limitations': 'Ограничения', 'clinical_significance': 'Значимость'}
+        response.json.return_value = {'candidates': [{'content': {'parts': [
+            {'text': 'internal thought', 'thought': True},
+            {'text': json.dumps(fields)},
+        ]}}]}
+        with patch.object(main.SESSION, 'post', return_value=response):
+            summary = main.ai_summary({'title': 'A', 'abstract': 'B'})
+        self.assertIn('Клиническая значимость: Значимость', summary)
+        self.assertNotIn('internal thought', summary)
 
     def test_empty_pubmed_is_failure(self):
         with self.assertRaises(RuntimeError):

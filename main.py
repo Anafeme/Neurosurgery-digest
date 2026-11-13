@@ -99,7 +99,12 @@ def fetch_articles(ids):
     for item in root.findall(".//PubmedArticle"):
         pmid = flatten(item.find("./MedlineCitation/PMID"))
         title = flatten(item.find(".//ArticleTitle"))
-        abstract = flatten(item.find(".//Abstract"))
+        abstract_nodes = item.findall(".//Abstract/AbstractText")
+        sections = {}
+        for node in abstract_nodes:
+            label = node.get("Label") or node.get("NlmCategory") or "ABSTRACT"
+            sections[label.upper()] = (sections.get(label.upper(), "") + " " + flatten(node)).strip()
+        abstract = " ".join(f"{label}: {text}" for label, text in sections.items())
         journal = flatten(item.find(".//Journal/Title"))
         year = flatten(item.find(".//PubDate/Year")) or flatten(item.find(".//PubDate/MedlineDate"))
         doi = ""
@@ -110,7 +115,7 @@ def fetch_articles(ids):
         if pmid and title and abstract:
             articles.append({
                 "pmid": pmid, "title": title, "abstract": abstract[:5500],
-                "journal": journal, "year": year, "doi": doi,
+                "journal": journal, "year": year, "doi": doi, "sections": sections,
                 "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
             })
     return articles
@@ -162,28 +167,43 @@ def translate_text(text):
 
 
 def fallback_summary(article):
-    # Extract sentences, never invent results or study-specific limitations.
-    abstract = article["abstract"]
-    sentences = re.split(r"(?<=[.!?])\s+", abstract)
-    results = [s for s in sentences if re.search(
-        r"result|conclu|associated|significan|mortality|outcome", s, re.I)]
-    extract = " ".join(results[-4:] or sentences[-3:])[:3500]
-    translated, ok = translate_text(extract)
-    label = "Машинный перевод выдержки из аннотации" if ok else "Оригинальная выдержка (перевод недоступен)"
+    """Extract each field separately, preserving authors' conclusions as quotations."""
+    sentences = re.split(r"(?<=[.!?])\s+", article["abstract"])
+    sections = article.get("sections", {})
+
+    def section(pattern):
+        return " ".join(text for label, text in sections.items() if re.search(pattern, label, re.I))
+
+    purpose = section(r"background|objective|purpose|aim|method")
+    results = section(r"result|finding")
+    limitations = section(r"limitation")
+    conclusion = section(r"conclu|interpretation|implication")
+    purpose = purpose or " ".join(sentences[:2])
+    results = results or " ".join(s for s in sentences if re.search(
+        r"result|significan|associated|mortality|\d+(?:\.\d+)?%", s, re.I))
+    limitations = limitations or " ".join(s for s in sentences if re.search(
+        r"limitation|limited by|small sample|selection bias|lack of|retrospective design", s, re.I))
+    conclusion = conclusion or " ".join(sentences[-2:])
+    # One translation request per paper. The bounded input fits the free endpoint.
+    extracted = (
+        f"Краткое содержание (цель и методы авторов): {purpose[:800]}\n"
+        f"Результаты: {results[:1100] or 'Отдельные результаты в аннотации не выделены.'}\n"
+        f"Ограничения, указанные в аннотации: {limitations[:600] or 'Явно не описаны.'}\n"
+        f"Клиническая значимость — заключение авторов: {conclusion[:900]}"
+    )
+    translated, ok = translate_text(extracted)
+    mode = "машинный перевод выдержек" if ok else "перевод недоступен, сохранён оригинал"
     return (
-        "Резервный режим без генеративного ИИ.\n"
-        f"Краткое содержание и результаты — {label}:\n{translated}\n"
-        "Ограничения: доступна только аннотация; дизайн, выборку, риск смещения и "
-        "ограничения авторов следует проверить по полному тексту.\n"
-        "Клиническая значимость: требует оценки применимости к конкретным пациентам; "
-        "автоматическая клиническая интерпретация в резервном режиме не выполняется."
+        f"Резервный режим без генеративного ИИ; {mode}.\n{translated}\n"
+        "Ограничения оценки: только аннотация, без независимой проверки полного текста. "
+        "Заключение авторов не является рекомендацией менять лечение."
     )
 
 
 def ai_summary(article):
     key = os.environ.get("GEMINI_API_KEY", "").strip()
-    # Explicit opt-in prevents accidentally using a key attached to paid billing.
-    if not key or os.environ.get("GEMINI_FREE_TIER", "").lower() != "true":
+    # Only configure keys from projects without billing; this flag can disable AI.
+    if not key or os.environ.get("GEMINI_FREE_TIER", "true").lower() != "true":
         return None
     model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
     if not re.fullmatch(r"[a-zA-Z0-9.-]+", model):
@@ -203,9 +223,11 @@ def ai_summary(article):
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
             headers={"x-goog-api-key": key}, json={"contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2200,
-                                 "responseMimeType": "application/json"}}, timeout=90)
+                                 "responseMimeType": "application/json",
+                                 "thinkingConfig": {"thinkingBudget": 0}}}, timeout=90)
         response.raise_for_status()
-        data = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"])
+        parts = response.json()["candidates"][0]["content"]["parts"]
+        data = json.loads("".join(p.get("text", "") for p in parts if not p.get("thought")))
         fields = {"summary": "Краткое содержание", "results": "Результаты",
                   "limitations": "Ограничения", "clinical_significance": "Клиническая значимость"}
         if any(not isinstance(data.get(k), str) or not data[k].strip() for k in fields):
@@ -231,6 +253,8 @@ def make_digest(articles, start, end):
             summary = fallback_summary(article)
         parts.append(f"{number}. {article['title']}\n{article['journal']} ({article['year']})\n"
                      f"{article['url']}\n{summary}")
+    mode = "ИИ с резервным режимом" if ai_available else "резервный режим без ИИ (полностью или частично)"
+    print(f"Digest prepared: {len(articles)} publications; {mode}", flush=True)
     return "\n\n".join(parts)
 
 
