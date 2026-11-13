@@ -21,26 +21,41 @@ class DigestTests(unittest.TestCase):
             self.assertGreaterEqual(sum(area in a['areas'] for a in articles), 3)
         self.assertEqual((end - start).days, 6)
 
-    def test_article_is_one_short_message_even_with_long_model_output(self):
-        article = {'title': '🧠' * 600, 'journal': 'Journal' * 100, 'year': '2026',
-                   'url': 'https://pubmed.ncbi.nlm.nih.gov/123/', 'abstract': 'Abstract',
-                   'areas': list(main.QUERIES)}
-        fields = {key: 'Очень длинное описание с числами 25% и ограничениями. ' * 100
-                  for key in ('objective', 'results')}
-        with patch.object(main, 'ai_summary', return_value=main.format_summary(fields)):
+    def test_article_has_russian_title_three_authors_and_complete_conclusion(self):
+        article = {'title': 'Original English title', 'authors': ['Smith', 'van Dijk', 'Lee', 'Jones'],
+                   'url': 'https://pubmed.ncbi.nlm.nih.gov/123/', 'abstract': 'Abstract'}
+        analysis = {'title_ru': 'Результаты лечения аневризм', 'conclusion': 'Преимущество лечения не доказано.'}
+        with patch.object(main, 'ai_summary', return_value=analysis):
             messages = main.make_digest([article], 'start', 'end')
-        self.assertEqual(len(messages), 2)  # Header + exactly one paper.
-        self.assertLessEqual(len(messages[1]), 1500)
-        self.assertLessEqual(len(messages[1].encode('utf-16-le')) // 2, 4096)
-        self.assertTrue(messages[1].endswith(article['url']))
-        for label in ('Цель:', 'Результат:'):
-            self.assertIn(label, messages[1])
+        self.assertEqual(len(messages), 2)
+        card = messages[1]
+        self.assertLessEqual(len(card), 1500)
+        self.assertTrue(card.endswith(article['url']))
+        self.assertIn(analysis['title_ru'], card)
+        self.assertIn('Smith, van Dijk, Lee', card)
+        self.assertNotIn('Jones', card)
+        self.assertNotIn('Original English title', card)
+        self.assertNotIn('Цель:', card)
+        self.assertNotIn('…', card)
+        self.assertIn('Вывод: Преимущество лечения не доказано.', card)
 
     def test_only_requested_fields_are_displayed(self):
-        result = main.format_summary({'objective': 'Оценить лечение', 'results': 'Боль уменьшилась',
-                                      'limitations': 'НЕ ВКЛЮЧАТЬ', 'clinical_significance': 'НЕ ВКЛЮЧАТЬ',
-                                      'design': 'НЕ ВКЛЮЧАТЬ'})
-        self.assertEqual(result, 'Цель: Оценить лечение\nРезультат: Боль уменьшилась')
+        result = main.format_summary({'title_ru': 'Влияние лечения', 'conclusion': 'Боль уменьшилась.',
+                                      'objective': 'НЕ ВКЛЮЧАТЬ', 'results': 'НЕ ВКЛЮЧАТЬ'})
+        self.assertEqual(result, {'title_ru': 'Влияние лечения', 'conclusion': 'Боль уменьшилась.'})
+
+    def test_long_or_unfinished_ai_conclusion_is_rejected_for_rewriting(self):
+        self.assertIsNone(main.format_summary({'title_ru': 'Название', 'conclusion': 'Длинный вывод ' * 100 + '.'}))
+        self.assertIsNone(main.format_summary({'title_ru': 'Название', 'conclusion': 'Обрезанный вывод…'}))
+        self.assertIsNone(main.format_summary({'title_ru': 'Название', 'conclusion': 'Обрезанный вывод...'}))
+        self.assertIsNone(main.format_summary({'title_ru': 'Название', 'conclusion': 'Незаконченное предложение'}))
+        self.assertIsNone(main.format_summary({'title_ru': 'English title', 'conclusion': 'Полный вывод.'}))
+
+    def test_fallback_extract_keeps_complete_sentences_without_ellipsis(self):
+        self.assertEqual(main.complete_excerpt('Полное предложение. ' + 'Длинное слово ' * 100, 100),
+                         'Полное предложение.')
+        self.assertIsNone(main.complete_excerpt('Одно огромное предложение ' * 100, 100))
+        self.assertIsNone(main.complete_excerpt('Вывод оборван…'))
 
     @patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': 'test-secret', 'TELEGRAM_CHAT_ID': '123'})
     def test_each_paper_has_exactly_one_send_request(self):
@@ -119,38 +134,39 @@ class DigestTests(unittest.TestCase):
 
     def test_fallback_survives_translation_failure(self):
         with patch.object(main.SESSION, 'get', side_effect=requests.Timeout):
-            result = main.fallback_summary({'abstract': 'Results were inconclusive.'})
-        self.assertIn('перевод недоступен', result.lower())
-        self.assertIn('Results were inconclusive.', result)
+            result = main.fallback_summary({'title': 'Original title', 'abstract': 'Results were inconclusive.'})
+        self.assertIn('переводе', result['title_ru'])
+        self.assertIn('без ИИ недоступен', result['conclusion'])
+        self.assertNotIn('…', str(result))
 
-    def test_fallback_only_includes_objective_and_results(self):
-        article = {'abstract': 'Background. Results. Conclusion.', 'sections': {
+    def test_fallback_is_labelled_authors_conclusion_and_has_no_objective(self):
+        article = {'title': 'Treatment efficacy', 'abstract': 'Abstract.', 'sections': {
             'OBJECTIVE': 'Assess treatment efficacy.',
             'METHODS': 'Randomized trial with 120 participants.',
             'RESULTS': 'Mortality was 10% versus 20%.',
-            'LIMITATIONS': 'Small sample size.',
             'CONCLUSIONS': 'Further trials are needed.',
         }}
-        with patch.object(main, 'translate_text', side_effect=lambda text: (text, True)):
+        def translate(text):
+            return ('Эффективность лечения' if text == article['title'] else 'Необходимы дополнительные исследования.'), True
+        with patch.object(main, 'translate_text', side_effect=translate):
             summary = main.fallback_summary(article)
-        self.assertIn('Assess treatment efficacy.', summary)
-        self.assertNotIn('120 participants', summary)
-        self.assertIn('10% versus 20%', summary)
-        self.assertNotIn('Small sample size', summary)
-        self.assertNotIn('Further trials are needed', summary)
+        self.assertEqual(summary['title_ru'], 'Эффективность лечения')
+        self.assertEqual(summary['conclusion'], 'Без ИИ — вывод авторов: Необходимы дополнительные исследования.')
+        self.assertNotIn('Цель:', str(summary))
+        self.assertNotIn('120', str(summary))
 
     @patch.dict(os.environ, {'GEMINI_API_KEY': 'test-key', 'GEMINI_FREE_TIER': 'true'})
     def test_ai_valid_structured_response(self):
         import json
         response = Mock()
-        fields = {'objective': 'Оценить лечение', 'results': 'Результаты'}
+        fields = {'title_ru': 'Влияние лечения', 'conclusion': 'Боль уменьшилась.'}
         response.json.return_value = {'candidates': [{'content': {'parts': [
             {'text': 'internal thought', 'thought': True},
             {'text': json.dumps(fields)},
         ]}}]}
         with patch.object(main.SESSION, 'post', return_value=response):
             summary = main.ai_summary({'title': 'A', 'abstract': 'B'})
-        self.assertIn('Цель: Оценить лечение', summary)
+        self.assertEqual(summary['conclusion'], 'Боль уменьшилась.')
         self.assertNotIn('internal thought', summary)
 
     @patch.dict(os.environ, {'OPENROUTER_API_KEY': 'private-test-key'})
@@ -158,11 +174,11 @@ class DigestTests(unittest.TestCase):
         import json
         response = Mock()
         response.json.return_value = {'choices': [{'message': {'content': json.dumps({
-            'objective': 'Оценить лечение', 'results': 'Результаты',
+            'title_ru': 'Влияние лечения', 'conclusion': 'Боль уменьшилась.',
         })}}]}
         with patch.object(main.SESSION, 'post', return_value=response) as post:
             result = main.openrouter_summary({'title': 'A', 'abstract': 'B'})
-        self.assertIn('Цель:', result)
+        self.assertEqual(result['title_ru'], 'Влияние лечения')
         payload = post.call_args.kwargs['json']
         self.assertEqual(payload['model'], 'openrouter/free')
         self.assertNotIn('models', payload)
@@ -177,7 +193,7 @@ class DigestTests(unittest.TestCase):
 
     def test_invalid_ai_payload_is_rejected(self):
         self.assertIsNone(main.format_summary([]))
-        self.assertIsNone(main.format_summary({'objective': 'partial'}))
+        self.assertIsNone(main.format_summary({'title_ru': 'Название'}))
 
     @patch.dict(os.environ, {'OPENROUTER_API_KEY': 'private-test-key'})
     def test_openrouter_retries_incomplete_fields(self):
@@ -186,7 +202,7 @@ class DigestTests(unittest.TestCase):
         bad.json.return_value = {'choices': [{'message': {'content': '{}'}}]}
         good = Mock(status_code=200)
         good.json.return_value = {'choices': [{'message': {'content': json.dumps({
-            'objective': 'Оценить лечение', 'results': 'Результаты',
+            'title_ru': 'Влияние лечения', 'conclusion': 'Боль уменьшилась.',
         })}}]}
         with patch.object(main.SESSION, 'post', side_effect=[bad, good]) as post:
             result = main.openrouter_summary({'title': 'A', 'abstract': 'B'})
@@ -196,12 +212,12 @@ class DigestTests(unittest.TestCase):
 
     def test_one_invalid_paper_does_not_disable_remaining_ai(self):
         articles = [{'title': 'A', 'abstract': 'B', 'journal': 'J', 'year': '2026', 'url': 'url'}] * 2
-        with patch.object(main, 'ai_summary', side_effect=[None, 'AI summary']) as ai, patch.object(
-            main, 'fallback_summary', return_value='fallback'
+        with patch.object(main, 'ai_summary', side_effect=[None, {'title_ru': 'Название', 'conclusion': 'ИИ вывод.'}]) as ai, patch.object(
+            main, 'fallback_summary', return_value={'title_ru': 'Название', 'conclusion': 'Без ИИ.'}
         ):
             digest = main.make_digest(articles, 'start', 'end')
         self.assertEqual(ai.call_count, 2)
-        self.assertTrue(any('AI summary' in message for message in digest))
+        self.assertTrue(any('ИИ вывод.' in message for message in digest))
 
     def test_country_flags_use_journal_country_and_handle_unknown(self):
         self.assertEqual(main.country_flag('United States'), '🇺🇸')
@@ -216,13 +232,14 @@ class DigestTests(unittest.TestCase):
         response.content = b"""<PubmedArticleSet><PubmedArticle><MedlineCitation>
           <PMID>123</PMID><Article><ArticleTitle>A paper</ArticleTitle>
           <Abstract><AbstractText>Results.</AbstractText></Abstract>
-          <AuthorList><Author><AffiliationInfo><Affiliation>France</Affiliation></AffiliationInfo></Author></AuthorList>
+          <AuthorList><Author><LastName>Smith</LastName><AffiliationInfo><Affiliation>France</Affiliation></AffiliationInfo></Author><Author><LastName>van Dijk</LastName></Author><Author><LastName>Lee</LastName></Author><Author><LastName>Jones</LastName></Author></AuthorList>
           </Article><MedlineJournalInfo><Country>Japan</Country></MedlineJournalInfo>
           </MedlineCitation></PubmedArticle></PubmedArticleSet>"""
         with patch.object(main, 'pubmed_request', return_value=response):
             article = main.fetch_articles(['123'])[0]
         self.assertEqual(article['country'], 'Japan')
-        message = main.article_message(article, 1, 1, 'Цель: Проверить.\nРезультат: Найдено.')
+        self.assertEqual(article['authors'], ['Smith', 'van Dijk', 'Lee'])
+        message = main.article_message(article, 1, 1, {'title_ru': 'Название статьи', 'conclusion': 'Результат найден.'})
         self.assertTrue(message.startswith('🇯🇵 1/1'))
         self.assertNotIn('France', message)
 
