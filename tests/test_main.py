@@ -66,6 +66,17 @@ class DigestTests(unittest.TestCase):
             self.assertEqual(main.send_telegram(messages), 3)
         self.assertEqual([call.kwargs['json']['text'] for call in post.call_args_list], messages)
 
+    @patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': 'test-secret', 'TELEGRAM_CHAT_ID': '123'})
+    def test_receipt_callbacks_record_only_accepted_messages(self):
+        response = Mock(ok=True, status_code=200)
+        response.json.return_value = {'ok': True, 'result': {'message_id': 1, 'chat': {'id': 123}}}
+        accepted, uncertain = Mock(), Mock()
+        with patch.object(main.SESSION, 'post', side_effect=[response, requests.Timeout]), patch.object(main.time, 'sleep'):
+            with self.assertRaisesRegex(main.DigestError, 'uncertain'):
+                main.send_telegram(['first', 'second'], on_delivered=accepted, on_uncertain=uncertain)
+        accepted.assert_called_once_with(0)
+        uncertain.assert_called_once_with(1)
+
     def test_ranking_favors_clinical_evidence(self):
         trial = {'publication_types': ['Randomized Controlled Trial'], 'title': 'Treatment comparison'}
         case = {'publication_types': ['Case Reports'], 'title': 'A case report'}

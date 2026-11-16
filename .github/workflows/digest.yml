@@ -10,13 +10,20 @@ on:
           - digest
           - telegram-test
         default: digest
+      force:
+        description: 'Отправить повторно, даже если выпуск этой недели уже доставлен'
+        type: boolean
+        default: false
   schedule:
     # Moscow is UTC+3 throughout the year.
     - cron: '0 6 * * 1'
+    # Recovery attempts at 09:15 and 09:45 MSK; confirmed messages are not repeated.
+    - cron: '15,45 6 * * 1'
   push:
     branches: [main]
     paths:
       - 'main.py'
+      - 'delivery.py'
       - 'requirements.txt'
       - 'tests/**'
       - '.github/workflows/digest.yml'
@@ -24,10 +31,6 @@ on:
 
 permissions:
   contents: read
-
-concurrency:
-  group: neuro-digest-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   validate:
@@ -41,15 +44,23 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements.txt
       - run: python -m pip check
-      - run: python -m py_compile main.py
+      - run: python -m py_compile main.py delivery.py
       - run: python -m unittest discover -s tests -v
 
   send:
     needs: validate
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: neuro-digest-delivery
+      cancel-in-progress: false
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      DIGEST_STATE_PATH: .digest-state.json
+      FORCE_DIGEST: ${{ inputs.force || 'false' }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || vars.TELEGRAM_CHAT_ID }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -58,14 +69,28 @@ jobs:
       GEMINI_FREE_TIER: ${{ vars.GEMINI_FREE_TIER || 'true' }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
       - run: python -m pip install -r requirements.txt
       - name: Test Telegram delivery
-        if: github.event_name == 'push' || inputs.mode == 'telegram-test'
+        if: inputs.mode == 'telegram-test'
         run: python main.py --test-telegram
       - name: Send digest
+        id: delivery
         if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode != 'telegram-test')
         run: python main.py
+      - name: Persist confirmed delivery progress
+        if: always() && (steps.delivery.outcome == 'success' || steps.delivery.outcome == 'failure')
+        run: |
+          if [ ! -f .digest-state.json ]; then exit 0; fi
+          git add -- .digest-state.json
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Record weekly digest delivery progress'
+          git pull --rebase origin "$DEFAULT_BRANCH"
+          git push origin "HEAD:$DEFAULT_BRANCH"

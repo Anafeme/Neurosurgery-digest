@@ -13,6 +13,8 @@ import requests
 import json
 import re
 
+from delivery import DeliveryError, deliver_weekly
+
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 TELEGRAM_API = "https://api.telegram.org/bot"
 TIMEOUT = 45
@@ -514,7 +516,7 @@ def make_digest(articles, start, end):
 
 
 
-def send_telegram(messages):
+def send_telegram(messages, on_delivered=None, on_uncertain=None):
     if isinstance(messages, str):
         messages = [messages]
     if any(not part or len(part.encode("utf-16-le")) // 2 > 4096 for part in messages):
@@ -523,7 +525,7 @@ def send_telegram(messages):
     chat_id = os.environ["TELEGRAM_CHAT_ID"].strip()
     url = f"{TELEGRAM_API}{token}/sendMessage"
     delivered = 0
-    for part in messages:
+    for index, part in enumerate(messages):
         for attempt in range(4):
             try:
                 response = SESSION.post(url, json={
@@ -533,6 +535,8 @@ def send_telegram(messages):
                 result = response.json()
             except (requests.RequestException, ValueError):
                 # A timeout can mean accepted delivery; avoid automatic duplicates.
+                if on_uncertain:
+                    on_uncertain(index)
                 raise DigestError("Telegram transport error; delivery uncertain") from None
             if response.status_code == 429 and attempt < 3:
                 delay = int(result.get("parameters", {}).get("retry_after", 5))
@@ -542,7 +546,11 @@ def send_telegram(messages):
                 raise DigestError(f"Telegram rejected message (HTTP {response.status_code})")
             receipt = result.get("result", {})
             if not receipt.get("message_id") or str(receipt.get("chat", {}).get("id")) != chat_id:
+                if on_uncertain:
+                    on_uncertain(index)
                 raise DigestError("Telegram returned an invalid delivery receipt")
+            if on_delivered:
+                on_delivered(index)
             delivered += 1
             print(f"Telegram confirmed message {delivered}; message_id={receipt['message_id']}", flush=True)
             break
@@ -558,12 +566,18 @@ def main():
         send_telegram("Тест Neurosurgery Digest: бот работает. Расписание: понедельник, 09:00 МСК.")
         print("SUCCESS: Telegram API confirmed test delivery", flush=True)
         return
-    print("Starting Neurosurgery Digest...", flush=True)
-    articles, start, end = select_articles()
-    print(f"Collected {len(articles)} articles", flush=True)
-    digest = make_digest(articles, start, end)
-    send_telegram(digest)
-    print("SUCCESS: Telegram API confirmed every digest message", flush=True)
+    def prepare_digest():
+        print("Starting Neurosurgery Digest...", flush=True)
+        articles, start, end = select_articles()
+        print(f"Collected {len(articles)} articles", flush=True)
+        return make_digest(articles, start, end)
+
+    deliver_weekly(
+        prepare_digest, send_telegram,
+        os.environ.get("DIGEST_STATE_PATH", ".digest-state.json"),
+        force=os.environ.get("FORCE_DIGEST", "false").lower() == "true",
+    )
+
 
 
 if __name__ == "__main__":
@@ -571,6 +585,6 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         # Never print exception text/tracebacks: requests URLs can contain secrets.
-        detail = str(exc) if isinstance(exc, DigestError) else "operation failed"
+        detail = str(exc) if isinstance(exc, (DigestError, DeliveryError)) else "operation failed"
         print(f"ERROR: {type(exc).__name__}; {detail}", file=sys.stderr, flush=True)
         sys.exit(1)
